@@ -68,7 +68,13 @@ mysql -u"$ISUCON_DB_USER" \
 		--port "$ISUCON_DB_PORT" \
 		"$ISUCON_DB_NAME" < initial_livecomments.sql
 
-bash ../pdns/init_zone.sh
+# PowerDNS を別ホストで動かしている場合(ISUCON13_PDNS_SSH_HOST)は、そのホストで init_zone.sh を実行する
+if [ -n "${ISUCON13_PDNS_SSH_HOST:-}" ]; then
+	ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new \
+		"$ISUCON13_PDNS_SSH_HOST" "bash /home/isucon/webapp/pdns/init_zone.sh"
+else
+	bash ../pdns/init_zone.sh
+fi
 
 # PowerDNS のレコード検索用インデックス（MySQL には CREATE INDEX IF NOT EXISTS がないため、なければ作成する）
 ISUDNS_USER=${ISUCON13_POWERDNS_DB_USER:-isudns}

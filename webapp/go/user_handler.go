@@ -32,6 +32,31 @@ const (
 
 var fallbackImage = "../img/NoImage.jpg"
 
+// PowerDNSを別ホストで動かす場合のssh接続先(例: isucon@isu3)。未設定ならローカルのpdnsutilを使う
+var pdnsSSHHost = os.Getenv("ISUCON13_PDNS_SSH_HOST")
+
+// pdnsutilCommand はpdnsutilを実行するコマンドを返す。pdnsSSHHostが設定されていればそのホストでsshして実行する
+func pdnsutilCommand(args ...string) *exec.Cmd {
+	if pdnsSSHHost == "" {
+		return exec.Command("pdnsutil", args...)
+	}
+	// ssh はリモートのシェルに文字列として渡すため、引数はシングルクォートで括ってシェルに解釈させない
+	quoted := make([]string, 0, len(args)+1)
+	quoted = append(quoted, "pdnsutil")
+	for _, arg := range args {
+		quoted = append(quoted, "'"+strings.ReplaceAll(arg, "'", `'\''`)+"'")
+	}
+	return exec.Command("ssh",
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=5",
+		"-o", "StrictHostKeyChecking=accept-new",
+		// 接続を使い回してregisterごとのssh接続コストを減らす
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPath=/tmp/isupipe-pdns-ssh-%C",
+		"-o", "ControlPersist=60",
+		pdnsSSHHost, strings.Join(quoted, " "))
+}
+
 // アイコン未設定ユーザのicon_hash。fallbackImageは変化しないので初回利用時に一度だけ計算する
 var (
 	fallbackIconHashOnce sync.Once
@@ -284,7 +309,7 @@ func registerHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to insert user theme: "+err.Error())
 	}
 
-	if out, err := exec.Command("pdnsutil", "add-record", "u.isucon.dev", req.Name, "A", "0", powerDNSSubdomainAddress).CombinedOutput(); err != nil {
+	if out, err := pdnsutilCommand("add-record", "u.isucon.dev", req.Name, "A", "0", powerDNSSubdomainAddress).CombinedOutput(); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, string(out)+": "+err.Error())
 	}
 

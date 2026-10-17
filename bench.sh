@@ -34,7 +34,8 @@ if [[ -n "${WEBHOOK_URL:-}" ]]; then
 	notify_discord "ベンチマークスタート (host: ${host})"
 fi
 
-ssh ${host} 'cd /home/isucon && ./bench_linux_amd64 run --target https://pipe.u.isucon.dev --nameserver 127.0.0.1 --webapp 52.192.44.134 --webapp 52.198.221.103 --webapp 35.77.86.88 --enable-ssl'
+# ベンチは isu1 で動かし、向き先は isu1。名前解決は isu3 の PowerDNS (/etc/hosts の isu3) を使う
+ssh ${host} 'cd /home/isucon && ./bench_linux_amd64 run --target https://pipe.u.isucon.dev --nameserver isu3 --webapp 52.198.221.103 --webapp 35.77.86.88 --webapp 13.193.224.85 --enable-ssl'
 benchmark_status=$?
 
 result_file=$(mktemp)
