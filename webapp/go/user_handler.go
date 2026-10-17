@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -117,11 +118,29 @@ func getIconHandler(c echo.Context) error {
 	defer tx.Rollback()
 
 	var user UserModel
-	if err := tx.GetContext(ctx, &user, "SELECT * FROM users WHERE name = ?", username); err != nil {
+	if err := tx.GetContext(ctx, &user, "SELECT id FROM users WHERE name = ?", username); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return echo.NewHTTPError(http.StatusNotFound, "not found user that has the given username")
 		}
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user: "+err.Error())
+	}
+
+	// 条件付きGET(If-None-Match)でicon_hashが一致する場合は、画像本体を読まずに304を返す
+	// 条件付きGETでない場合は304を返してはいけないので、ヘッダがあるときだけ判定する
+	if ifNoneMatch := c.Request().Header.Get("If-None-Match"); ifNoneMatch != "" {
+		var iconHash string
+		if err := tx.GetContext(ctx, &iconHash, "SELECT icon_hash FROM icons WHERE user_id = ?", user.ID); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user icon hash: "+err.Error())
+			}
+			iconHash, err = getFallbackIconHash()
+			if err != nil {
+				return echo.NewHTTPError(http.StatusInternalServerError, "failed to get fallback icon hash: "+err.Error())
+			}
+		}
+		if strings.Trim(ifNoneMatch, `"`) == iconHash {
+			return c.NoContent(http.StatusNotModified)
+		}
 	}
 
 	var image []byte
