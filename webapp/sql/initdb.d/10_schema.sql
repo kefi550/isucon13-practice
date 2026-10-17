@@ -85,7 +85,8 @@ CREATE TABLE `livestream_viewers_history` (
   `user_id` BIGINT NOT NULL,
   `livestream_id` BIGINT NOT NULL,
   `created_at` BIGINT NOT NULL,
-  INDEX `idx_user_id_livestream_id` (`user_id`, `livestream_id`)
+  INDEX `idx_user_id_livestream_id` (`user_id`, `livestream_id`),
+  INDEX `idx_livestream_id` (`livestream_id`)
 ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 -- ライブ配信に対するライブコメント
