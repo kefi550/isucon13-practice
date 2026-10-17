@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net/http"
+	"sync/atomic"
 
+	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v4"
 )
 
@@ -22,23 +25,39 @@ type TagsResponse struct {
 	Tags []*Tag `json:"tags"`
 }
 
-func getTagHandler(c echo.Context) error {
-	ctx := c.Request().Context()
+// tagsはリクエスト処理中に書き込まれないため、起動時と初期化時にメモリへ読み込んで保持する
+type tagCache struct {
+	list []*TagModel // SELECT * FROM tags の順序のまま保持する
+	byID map[int64]*TagModel
+}
 
-	tx, err := dbConn.BeginTxx(ctx, nil)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin new transaction: : "+err.Error()+err.Error())
-	}
-	defer tx.Rollback()
+var tagCacheStore atomic.Pointer[tagCache]
 
+func loadTagCache(ctx context.Context, db *sqlx.DB) error {
 	var tagModels []*TagModel
-	if err := tx.SelectContext(ctx, &tagModels, "SELECT * FROM tags"); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get tags: "+err.Error())
+	if err := db.SelectContext(ctx, &tagModels, "SELECT * FROM tags"); err != nil {
+		return err
 	}
 
-	if err := tx.Commit(); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
+	byID := make(map[int64]*TagModel, len(tagModels))
+	for _, tagModel := range tagModels {
+		byID[tagModel.ID] = tagModel
 	}
+	tagCacheStore.Store(&tagCache{list: tagModels, byID: byID})
+	return nil
+}
+
+// 存在しないIDの場合はDBから引いたときと同じくsql.ErrNoRowsを返す
+func getTagByID(id int64) (*TagModel, error) {
+	tagModel, ok := tagCacheStore.Load().byID[id]
+	if !ok {
+		return nil, sql.ErrNoRows
+	}
+	return tagModel, nil
+}
+
+func getTagHandler(c echo.Context) error {
+	tagModels := tagCacheStore.Load().list
 
 	tags := make([]*Tag, len(tagModels))
 	for i := range tagModels {
