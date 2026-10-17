@@ -68,6 +68,15 @@ mysql -u"$ISUCON_DB_USER" \
 		--port "$ISUCON_DB_PORT" \
 		"$ISUCON_DB_NAME" < initial_livecomments.sql
 
-bash ../pdns/init_zone.sh 
+bash ../pdns/init_zone.sh
+
+# PowerDNS のレコード検索用インデックス（MySQL には CREATE INDEX IF NOT EXISTS がないため、なければ作成する）
+ISUDNS_USER=${ISUCON13_POWERDNS_DB_USER:-isudns}
+ISUDNS_PASSWORD=${ISUCON13_POWERDNS_DB_PASSWORD:-isudns}
+if [ "$(mysql -u"$ISUDNS_USER" -p"$ISUDNS_PASSWORD" --host "$ISUCON_DB_HOST" --port "$ISUCON_DB_PORT" -N isudns \
+	-e "SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema='isudns' AND table_name='records' AND index_name='nametype_index'")" = "0" ]; then
+	mysql -u"$ISUDNS_USER" -p"$ISUDNS_PASSWORD" --host "$ISUCON_DB_HOST" --port "$ISUCON_DB_PORT" isudns \
+		-e "CREATE INDEX nametype_index ON records(name, type)"
+fi
 
 
