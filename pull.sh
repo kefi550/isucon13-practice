@@ -10,7 +10,7 @@ rsync -av isu1:~/webapp/go/ "${LOCAL_PATH}/webapp/go/"
 mkdir -p ${LOCAL_PATH}/webapp/sql/
 rsync -avr isu1:~/webapp/sql/ "${LOCAL_PATH}/webapp/sql/"
 
-for i in $(seq 1 2); do
+for i in $(seq 1 3); do
   host="isu${i}"
 
   rsync -avr ${host}:~/env.sh "${LOCAL_PATH}/env.sh.${i}"
