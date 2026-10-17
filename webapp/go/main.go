@@ -94,11 +94,17 @@ func connectDB(logger echo.Logger) (*sqlx.DB, error) {
 		conf.ParseTime = parseTime
 	}
 
+	// クライアント側でパラメータを展開することでサーバサイドプリペアドステートメントを省略する
+	conf.Params = map[string]string{
+		"interpolateParams": "true",
+	}
+
 	db, err := sqlx.Open("mysql", conf.FormatDSN())
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(10)
+	db.SetMaxOpenConns(100)
+	db.SetMaxIdleConns(100)
 
 	if err := db.Ping(); err != nil {
 		return nil, err
@@ -117,6 +123,8 @@ func initializeHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to load tags: "+err.Error())
 	}
 
+	clearIconCache()
+
 	c.Request().Header.Add("Content-Type", "application/json;charset=utf-8")
 	return c.JSON(http.StatusOK, InitializeResponse{
 		Language: "golang",
@@ -125,6 +133,8 @@ func initializeHandler(c echo.Context) error {
 
 func main() {
 	e := echo.New()
+	// NOTE: Debug=true のままにする。echo は Debug 時に JSON をインデントして出力するため、
+	//       レスポンスを従来と同一に保つために必要。
 	e.Debug = true
 	e.Logger.SetLevel(echolog.DEBUG)
 	e.Use(middleware.Logger())

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -102,14 +103,9 @@ func getLivecommentsHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livecomments: "+err.Error())
 	}
 
-	livecomments := make([]Livecomment, len(livecommentModels))
-	for i := range livecommentModels {
-		livecomment, err := fillLivecommentResponse(ctx, tx, livecommentModels[i])
-		if err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to fil livecomments: "+err.Error())
-		}
-
-		livecomments[i] = livecomment
+	livecomments, err := fillLivecommentResponses(ctx, tx, livecommentModels)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fil livecomments: "+err.Error())
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -202,23 +198,12 @@ func postLivecommentHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get NG words: "+err.Error())
 	}
 
-	var hitSpam int
-	for _, ngword := range ngwords {
-		query := `
-		SELECT COUNT(*)
-		FROM
-		(SELECT ? AS text) AS texts
-		INNER JOIN
-		(SELECT CONCAT('%', ?, '%')	AS pattern) AS patterns
-		ON texts.text LIKE patterns.pattern;
-		`
-		if err := tx.GetContext(ctx, &hitSpam, query, req.Comment, ngword.Word); err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get hitspam: "+err.Error())
-		}
-		c.Logger().Infof("[hitSpam=%d] comment = %s", hitSpam, req.Comment)
-		if hitSpam >= 1 {
-			return echo.NewHTTPError(http.StatusBadRequest, "このコメントがスパム判定されました")
-		}
+	hitSpam, err := commentHitsSpam(ctx, tx, c.Logger(), req.Comment, ngwords)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get hitspam: "+err.Error())
+	}
+	if hitSpam {
+		return echo.NewHTTPError(http.StatusBadRequest, "このコメントがスパム判定されました")
 	}
 
 	now := time.Now().Unix()
@@ -388,28 +373,8 @@ func moderateHandler(c echo.Context) error {
 
 	// NGワードにヒットする過去の投稿も全削除する
 	for _, ngword := range ngwords {
-		// ライブコメント一覧取得
-		var livecomments []*LivecommentModel
-		if err := tx.SelectContext(ctx, &livecomments, "SELECT * FROM livecomments"); err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livecomments: "+err.Error())
-		}
-
-		for _, livecomment := range livecomments {
-			query := `
-			DELETE FROM livecomments
-			WHERE
-			id = ? AND
-			livestream_id = ? AND
-			(SELECT COUNT(*)
-			FROM
-			(SELECT ? AS text) AS texts
-			INNER JOIN
-			(SELECT CONCAT('%', ?, '%')	AS pattern) AS patterns
-			ON texts.text LIKE patterns.pattern) >= 1;
-			`
-			if _, err := tx.ExecContext(ctx, query, livecomment.ID, livestreamID, livecomment.Comment, ngword.Word); err != nil {
-				return echo.NewHTTPError(http.StatusInternalServerError, "failed to delete old livecomments that hit spams: "+err.Error())
-			}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM livecomments WHERE livestream_id = ? AND comment LIKE CONCAT('%', ?, '%')", livestreamID, ngword.Word); err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to delete old livecomments that hit spams: "+err.Error())
 		}
 	}
 
@@ -421,62 +386,31 @@ func moderateHandler(c echo.Context) error {
 		"word_id": wordID,
 	})
 }
+// commentHitsSpam は NG ワードにコメントがヒットするかを判定する。
+// LIKE '%word%' 相当の判定をメモリ上で行い、ワイルドカードを含むワードのみ SQL にフォールバックする。
+func commentHitsSpam(ctx context.Context, tx *sqlx.Tx, logger echo.Logger, comment string, ngwords []*NGWord) (bool, error) {
+	for _, ngword := range ngwords {
+		var hitSpam int
+		if strings.ContainsAny(ngword.Word, "%_\\") {
+			query := `
+			SELECT COUNT(*)
+			FROM
+			(SELECT ? AS text) AS texts
+			INNER JOIN
+			(SELECT CONCAT('%', ?, '%')	AS pattern) AS patterns
+			ON texts.text LIKE patterns.pattern;
+			`
+			if err := tx.GetContext(ctx, &hitSpam, query, comment, ngword.Word); err != nil {
+				return false, err
+			}
+		} else if strings.Contains(comment, ngword.Word) {
+			hitSpam = 1
+		}
 
-func fillLivecommentResponse(ctx context.Context, tx *sqlx.Tx, livecommentModel LivecommentModel) (Livecomment, error) {
-	commentOwnerModel := UserModel{}
-	if err := tx.GetContext(ctx, &commentOwnerModel, "SELECT * FROM users WHERE id = ?", livecommentModel.UserID); err != nil {
-		return Livecomment{}, err
+		logger.Infof("[hitSpam=%d] comment = %s", hitSpam, comment)
+		if hitSpam >= 1 {
+			return true, nil
+		}
 	}
-	commentOwner, err := fillUserResponse(ctx, tx, commentOwnerModel)
-	if err != nil {
-		return Livecomment{}, err
-	}
-
-	livestreamModel := LivestreamModel{}
-	if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livecommentModel.LivestreamID); err != nil {
-		return Livecomment{}, err
-	}
-	livestream, err := fillLivestreamResponse(ctx, tx, livestreamModel)
-	if err != nil {
-		return Livecomment{}, err
-	}
-
-	livecomment := Livecomment{
-		ID:         livecommentModel.ID,
-		User:       commentOwner,
-		Livestream: livestream,
-		Comment:    livecommentModel.Comment,
-		Tip:        livecommentModel.Tip,
-		CreatedAt:  livecommentModel.CreatedAt,
-	}
-
-	return livecomment, nil
-}
-
-func fillLivecommentReportResponse(ctx context.Context, tx *sqlx.Tx, reportModel LivecommentReportModel) (LivecommentReport, error) {
-	reporterModel := UserModel{}
-	if err := tx.GetContext(ctx, &reporterModel, "SELECT * FROM users WHERE id = ?", reportModel.UserID); err != nil {
-		return LivecommentReport{}, err
-	}
-	reporter, err := fillUserResponse(ctx, tx, reporterModel)
-	if err != nil {
-		return LivecommentReport{}, err
-	}
-
-	livecommentModel := LivecommentModel{}
-	if err := tx.GetContext(ctx, &livecommentModel, "SELECT * FROM livecomments WHERE id = ?", reportModel.LivecommentID); err != nil {
-		return LivecommentReport{}, err
-	}
-	livecomment, err := fillLivecommentResponse(ctx, tx, livecommentModel)
-	if err != nil {
-		return LivecommentReport{}, err
-	}
-
-	report := LivecommentReport{
-		ID:          reportModel.ID,
-		Reporter:    reporter,
-		Livecomment: livecomment,
-		CreatedAt:   reportModel.CreatedAt,
-	}
-	return report, nil
+	return false, nil
 }

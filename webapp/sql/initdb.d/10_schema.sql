@@ -84,6 +84,7 @@ CREATE TABLE `livestream_viewers_history` (
   `user_id` BIGINT NOT NULL,
   `livestream_id` BIGINT NOT NULL,
   `created_at` BIGINT NOT NULL,
+  INDEX `idx_livestream_id` (`livestream_id`),
   INDEX `idx_user_id_livestream_id` (`user_id`, `livestream_id`)
 ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
@@ -95,7 +96,8 @@ CREATE TABLE `livecomments` (
   `comment` VARCHAR(255) NOT NULL,
   `tip` BIGINT NOT NULL DEFAULT 0,
   `created_at` BIGINT NOT NULL,
-  INDEX `idx_livestream_id_created_at` (`livestream_id`, `created_at`)
+  -- tip まで含めることでライブ配信ごとのチップ合計が covering index で求まる
+  INDEX `idx_livestream_id_created_at_tip` (`livestream_id`, `created_at`, `tip`)
 ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 -- ユーザからのライブコメントのスパム報告
@@ -115,7 +117,8 @@ CREATE TABLE `ng_words` (
   `livestream_id` BIGINT NOT NULL,
   `word` VARCHAR(255) NOT NULL,
   `created_at` BIGINT NOT NULL,
-  INDEX `idx_user_id_livestream_id_created_at` (`user_id`, `livestream_id`, `created_at`)
+  INDEX `idx_user_id_livestream_id_created_at` (`user_id`, `livestream_id`, `created_at`),
+  INDEX `idx_livestream_id` (`livestream_id`)
 ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 CREATE INDEX ng_words_word ON ng_words(`word`);
 
