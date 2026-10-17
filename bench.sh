@@ -1,6 +1,6 @@
 #!/bin/bash
 
-host=isu1
+host=isu2
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 if [[ -f "$script_dir/.env" ]]; then
