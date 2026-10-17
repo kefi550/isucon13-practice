@@ -1,5 +1,6 @@
 #!/bin/bash
 
+host=isu1
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 if [[ -f "$script_dir/.env" ]]; then
@@ -28,13 +29,13 @@ if [[ -n "${WEBHOOK_URL:-}" ]]; then
 	notify_discord 'ベンチマークスタート'
 fi
 
-ssh isu1 'cd /home/isucon && ./bench_linux_amd64 run --target https://pipe.u.isucon.dev --nameserver 127.0.0.1 --webapp 52.198.221.103 --enable-ssl'
+ssh ${host} 'cd /home/isucon && ./bench_linux_amd64 run --target https://pipe.u.isucon.dev --nameserver 127.0.0.1 --webapp 52.192.44.134 --webapp 52.198.221.103 --webapp 35.77.86.88 --enable-ssl'
 benchmark_status=$?
 
 result_file=$(mktemp)
 trap 'rm -f "$result_file"' EXIT
 
-ssh isu1 'cat /tmp/result.json' | tee "$result_file"
+ssh ${host} 'cat /tmp/result.json' | tee "$result_file"
 
 if [[ -n "${WEBHOOK_URL:-}" ]]; then
 	if jq -e . "$result_file" >/dev/null 2>&1; then
