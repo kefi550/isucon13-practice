@@ -130,6 +130,7 @@ var (
 	userInfoCache     sync.Map // int64 -> userInfo
 	userNameToIDCache sync.Map // string -> int64
 	iconImageCache    sync.Map // int64 -> []byte (アイコン画像)
+	livestreamCache   sync.Map // int64 -> Livestream (owner/tags込みで組み立て済み)
 )
 
 func loadUserInfo(ctx context.Context, q sqlx.QueryerContext, userID int64) (userInfo, error) {
@@ -203,15 +204,35 @@ func getUserIconImage(ctx context.Context, q sqlx.QueryerContext, userID int64) 
 	return image, nil
 }
 
+// getCachedLivestream は組み立て済みの配信レスポンスをメモリから返す
+func getCachedLivestream(livestreamID int64) (Livestream, bool) {
+	if cached, ok := livestreamCache.Load(livestreamID); ok {
+		return cached.(Livestream), true
+	}
+	return Livestream{}, false
+}
+
+// cacheLivestream は組み立て済みの配信レスポンスを保存する
+func cacheLivestream(livestream Livestream) {
+	livestreamCache.Store(livestream.ID, livestream)
+}
+
 // invalidateUserInfoCache はアイコン変更時に呼び出してキャッシュを捨てる
 // (画像と icon_hash を別々に更新すると不整合が起きうるため、両方捨てて次の参照で読み直す)
 func invalidateUserInfoCache(userID int64) {
 	userInfoCache.Delete(userID)
 	iconImageCache.Delete(userID)
+	// 配信レスポンスにはオーナーの icon_hash が埋め込まれているため、該当オーナーの配信キャッシュも捨てる
+	livestreamCache.Range(func(key, value any) bool {
+		if value.(Livestream).Owner.ID == userID {
+			livestreamCache.Delete(key)
+		}
+		return true
+	})
 }
 
-// resetUserCaches は初期化時に呼び出して全キャッシュを捨てる
-func resetUserCaches() {
+// resetCaches は初期化時に呼び出して全キャッシュを捨てる
+func resetCaches() {
 	userInfoCache.Range(func(key, _ any) bool {
 		userInfoCache.Delete(key)
 		return true
@@ -222,6 +243,10 @@ func resetUserCaches() {
 	})
 	iconImageCache.Range(func(key, _ any) bool {
 		iconImageCache.Delete(key)
+		return true
+	})
+	livestreamCache.Range(func(key, _ any) bool {
+		livestreamCache.Delete(key)
 		return true
 	})
 }

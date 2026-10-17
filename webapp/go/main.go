@@ -118,8 +118,8 @@ func initializeHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
 	}
 
-	// DBを作り直したので、ユーザ情報 (name解決・テーマ・icon_hash・画像) のキャッシュも捨てる
-	resetUserCaches()
+	// DBを作り直したので、ユーザ情報 (name解決・テーマ・icon_hash・画像) と配信レスポンスのキャッシュも捨てる
+	resetCaches()
 
 	if err := loadTagCache(c.Request().Context(), dbConn); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to load tags: "+err.Error())

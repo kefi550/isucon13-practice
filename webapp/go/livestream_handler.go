@@ -163,6 +163,9 @@ func reserveLivestreamHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
 	}
 
+	// 作成した配信をキャッシュへ登録する (commit後に確定した内容のみキャッシュする)
+	cacheLivestream(livestream)
+
 	return c.JSON(http.StatusCreated, livestream)
 }
 
@@ -357,12 +360,13 @@ func getLivestreamHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
 	}
 
-	livestream, err := fillLivestreamResponse(ctx, dbConn, livestreamModel)
+	// 配信レスポンスはメモリキャッシュを使う (書き込み系は fillLivestreamResponse を使う)
+	livestreams, err := fillLivestreamResponses(ctx, dbConn, []*LivestreamModel{&livestreamModel})
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill livestream: "+err.Error())
 	}
 
-	return c.JSON(http.StatusOK, livestream)
+	return c.JSON(http.StatusOK, livestreams[0])
 }
 
 func getLivecommentReportsHandler(c echo.Context) error {
@@ -404,16 +408,53 @@ func getLivecommentReportsHandler(c echo.Context) error {
 	return c.JSON(http.StatusOK, reports)
 }
 
+// fillLivestreamResponse は単体の配信レスポンスを組み立てる
+// 書き込みトランザクション内から呼ばれる場合があるため、キャッシュの読み書きはしない
 func fillLivestreamResponse(ctx context.Context, q sqlx.QueryerContext, livestreamModel LivestreamModel) (Livestream, error) {
-	livestreams, err := fillLivestreamResponses(ctx, q, []*LivestreamModel{&livestreamModel})
+	livestreams, err := buildLivestreamResponses(ctx, q, []*LivestreamModel{&livestreamModel})
 	if err != nil {
 		return Livestream{}, err
 	}
 	return livestreams[0], nil
 }
 
-// fillLivestreamResponses は複数の配信レスポンスを IN 句でまとめて組み立てる (N+1解消)
+// fillLivestreamResponses は複数の配信レスポンスを組み立てる (N+1解消 + メモリキャッシュ)
+// 配信は作成後に内容が変わらないため、組み立て済みのレスポンスをID単位でキャッシュする。
+// キャッシュは initialize と、オーナーのアイコン更新時 (invalidateUserInfoCache) に捨てられる。
 func fillLivestreamResponses(ctx context.Context, q sqlx.QueryerContext, livestreamModels []*LivestreamModel) ([]Livestream, error) {
+	if len(livestreamModels) == 0 {
+		return []Livestream{}, nil
+	}
+
+	uncachedModels := make([]*LivestreamModel, 0, len(livestreamModels))
+	for _, livestreamModel := range livestreamModels {
+		if _, ok := getCachedLivestream(livestreamModel.ID); !ok {
+			uncachedModels = append(uncachedModels, livestreamModel)
+		}
+	}
+	if len(uncachedModels) > 0 {
+		built, err := buildLivestreamResponses(ctx, q, uncachedModels)
+		if err != nil {
+			return nil, err
+		}
+		for _, livestream := range built {
+			cacheLivestream(livestream)
+		}
+	}
+
+	livestreams := make([]Livestream, len(livestreamModels))
+	for i, livestreamModel := range livestreamModels {
+		livestream, ok := getCachedLivestream(livestreamModel.ID)
+		if !ok {
+			return nil, sql.ErrNoRows
+		}
+		livestreams[i] = livestream
+	}
+	return livestreams, nil
+}
+
+// buildLivestreamResponses は複数の配信レスポンスを IN 句でまとめて組み立てる (N+1解消)
+func buildLivestreamResponses(ctx context.Context, q sqlx.QueryerContext, livestreamModels []*LivestreamModel) ([]Livestream, error) {
 	if len(livestreamModels) == 0 {
 		return []Livestream{}, nil
 	}
