@@ -14,7 +14,12 @@ notify_discord() {
 
 	# Discord のメッセージ上限は 2000 文字なので超える場合は切り詰める
 	if (( ${#message} > 2000 )); then
-		message="${message:0:1986}...(省略)"
+		local omission='...(省略)'
+		# 末尾がコードブロックの場合は、閉じフェンスが消えないように残す
+		if [[ "$message" == *'```' ]]; then
+			omission=$'...(省略)\n```'
+		fi
+		message="${message:0:$((2000 - ${#omission}))}${omission}"
 	fi
 
 	payload=$(jq -cn --arg content "$message" '{content: $content}') || return
@@ -39,7 +44,7 @@ ssh ${host} 'cat /tmp/result.json' | tee "$result_file"
 
 if [[ -n "${WEBHOOK_URL:-}" ]]; then
 	if jq -e . "$result_file" >/dev/null 2>&1; then
-		notify_discord "ベンチマーク結果
+    notify_discord "ベンチマーク結果 (host: ${host})
 \`\`\`json
 $(jq -c . "$result_file")
 \`\`\`"
