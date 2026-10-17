@@ -154,17 +154,13 @@ func postIconHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "failed to decode the request body as json")
 	}
 
-	tx, err := dbConn.BeginTxx(ctx, nil)
+	// icons.user_idのインデックスでDELETE→INSERTが別ユーザ間でもギャップロックで
+	// デッドロックするため、ギャップロックを取らないREAD COMMITTEDで実行する
+	tx, err := dbConn.BeginTxx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
 	}
 	defer tx.Rollback()
-
-	// icons.user_idにインデックスを張ったため、同一ユーザの同時更新でDELETE→INSERTがデッドロックする。
-	// usersの行ロックで同一ユーザの更新を直列化する
-	if _, err := tx.ExecContext(ctx, "SELECT id FROM users WHERE id = ? FOR UPDATE", userID); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to lock user: "+err.Error())
-	}
 
 	if _, err := tx.ExecContext(ctx, "DELETE FROM icons WHERE user_id = ?", userID); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to delete old user icon: "+err.Error())
