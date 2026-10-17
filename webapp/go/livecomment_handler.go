@@ -465,6 +465,9 @@ func fillLivecommentReportResponse(ctx context.Context, q sqlx.QueryerContext, r
 	if err != nil {
 		return LivecommentReport{}, err
 	}
+	if len(reports) == 0 {
+		return LivecommentReport{}, sql.ErrNoRows
+	}
 	return reports[0], nil
 }
 
@@ -499,13 +502,12 @@ func fillLivecommentReportResponses(ctx context.Context, q sqlx.QueryerContext, 
 	if err != nil {
 		return nil, err
 	}
+	// モデレーションで削除済みのコメントは取得結果に含まれないため、その分は後段で報告ごと除外する
 	livecommentModelSlice := make([]*LivecommentModel, 0, len(livecommentModels))
 	for _, livecommentID := range uniqueLivecommentIDs {
-		livecommentModel, ok := livecommentModels[livecommentID]
-		if !ok {
-			return nil, sql.ErrNoRows
+		if livecommentModel, ok := livecommentModels[livecommentID]; ok {
+			livecommentModelSlice = append(livecommentModelSlice, livecommentModel)
 		}
-		livecommentModelSlice = append(livecommentModelSlice, livecommentModel)
 	}
 	livecommentResponses, err := fillLivecommentResponses(ctx, q, livecommentModelSlice)
 	if err != nil {
@@ -516,23 +518,24 @@ func fillLivecommentReportResponses(ctx context.Context, q sqlx.QueryerContext, 
 		livecommentsByID[livecommentModel.ID] = livecommentResponses[i]
 	}
 
-	reports := make([]LivecommentReport, len(reportModels))
-	for i, reportModel := range reportModels {
+	reports := make([]LivecommentReport, 0, len(reportModels))
+	for _, reportModel := range reportModels {
 		reporter, ok := userResponses[reportModel.UserID]
 		if !ok {
 			return nil, sql.ErrNoRows
 		}
 		livecomment, ok := livecommentsByID[reportModel.LivecommentID]
 		if !ok {
-			return nil, sql.ErrNoRows
+			// 報告対象のコメントが既に削除されている場合は一覧に含めない
+			continue
 		}
 
-		reports[i] = LivecommentReport{
+		reports = append(reports, LivecommentReport{
 			ID:          reportModel.ID,
 			Reporter:    reporter,
 			Livecomment: livecomment,
 			CreatedAt:   reportModel.CreatedAt,
-		}
+		})
 	}
 	return reports, nil
 }
