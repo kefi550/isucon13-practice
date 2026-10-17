@@ -26,7 +26,7 @@ notify_discord() {
 }
 
 if [[ -n "${WEBHOOK_URL:-}" ]]; then
-	notify_discord 'ベンチマークスタート'
+	notify_discord "ベンチマークスタート (host: ${host})"
 fi
 
 ssh ${host} 'cd /home/isucon && ./bench_linux_amd64 run --target https://pipe.u.isucon.dev --nameserver 127.0.0.1 --webapp 52.192.44.134 --webapp 52.198.221.103 --webapp 35.77.86.88 --enable-ssl'
