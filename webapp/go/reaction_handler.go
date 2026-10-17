@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -46,12 +47,6 @@ func getReactionsHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "livestream_id in path must be integer")
 	}
 
-	tx, err := dbConn.BeginTxx(ctx, nil)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
-	}
-	defer tx.Rollback()
-
 	query := "SELECT * FROM reactions WHERE livestream_id = ? ORDER BY created_at DESC"
 	if c.QueryParam("limit") != "" {
 		limit, err := strconv.Atoi(c.QueryParam("limit"))
@@ -61,23 +56,14 @@ func getReactionsHandler(c echo.Context) error {
 		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
 
-	reactionModels := []ReactionModel{}
-	if err := tx.SelectContext(ctx, &reactionModels, query, livestreamID); err != nil {
+	var reactionModels []*ReactionModel
+	if err := dbConn.SelectContext(ctx, &reactionModels, query, livestreamID); err != nil {
 		return echo.NewHTTPError(http.StatusNotFound, "failed to get reactions")
 	}
 
-	reactions := make([]Reaction, len(reactionModels))
-	for i := range reactionModels {
-		reaction, err := fillReactionResponse(ctx, tx, reactionModels[i])
-		if err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill reaction: "+err.Error())
-		}
-
-		reactions[i] = reaction
-	}
-
-	if err := tx.Commit(); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
+	reactions, err := fillReactionResponses(ctx, dbConn, reactionModels)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill reaction: "+err.Error())
 	}
 
 	return c.JSON(http.StatusOK, reactions)
@@ -141,32 +127,81 @@ func postReactionHandler(c echo.Context) error {
 	return c.JSON(http.StatusCreated, reaction)
 }
 
-func fillReactionResponse(ctx context.Context, tx *sqlx.Tx, reactionModel ReactionModel) (Reaction, error) {
-	userModel := UserModel{}
-	if err := tx.GetContext(ctx, &userModel, "SELECT * FROM users WHERE id = ?", reactionModel.UserID); err != nil {
-		return Reaction{}, err
-	}
-	user, err := fillUserResponse(ctx, tx, userModel)
+func fillReactionResponse(ctx context.Context, q sqlx.QueryerContext, reactionModel ReactionModel) (Reaction, error) {
+	reactions, err := fillReactionResponses(ctx, q, []*ReactionModel{&reactionModel})
 	if err != nil {
 		return Reaction{}, err
 	}
+	return reactions[0], nil
+}
 
-	livestreamModel := LivestreamModel{}
-	if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", reactionModel.LivestreamID); err != nil {
-		return Reaction{}, err
+// fillReactionResponses は複数のリアクションレスポンスを IN 句でまとめて組み立てる (N+1解消)
+func fillReactionResponses(ctx context.Context, q sqlx.QueryerContext, reactionModels []*ReactionModel) ([]Reaction, error) {
+	if len(reactionModels) == 0 {
+		return []Reaction{}, nil
 	}
-	livestream, err := fillLivestreamResponse(ctx, tx, livestreamModel)
+
+	userIDs := make([]int64, 0, len(reactionModels))
+	livestreamIDs := make([]int64, 0, len(reactionModels))
+	for _, reactionModel := range reactionModels {
+		userIDs = append(userIDs, reactionModel.UserID)
+		livestreamIDs = append(livestreamIDs, reactionModel.LivestreamID)
+	}
+
+	users, err := fetchUsersByIDs(ctx, q, userIDs)
 	if err != nil {
-		return Reaction{}, err
+		return nil, err
+	}
+	userResponses := make(map[int64]User, len(users))
+	for userID, userModel := range users {
+		user, err := fillUserResponse(ctx, q, *userModel)
+		if err != nil {
+			return nil, err
+		}
+		userResponses[userID] = user
 	}
 
-	reaction := Reaction{
-		ID:         reactionModel.ID,
-		EmojiName:  reactionModel.EmojiName,
-		User:       user,
-		Livestream: livestream,
-		CreatedAt:  reactionModel.CreatedAt,
+	// 配信は重複を除いてまとめて取得し、元の順序に合わせて割り当てる
+	uniqueLivestreamIDs := distinctInt64s(livestreamIDs)
+	livestreamModels, err := fetchLivestreamsByIDs(ctx, q, uniqueLivestreamIDs)
+	if err != nil {
+		return nil, err
+	}
+	livestreamModelSlice := make([]*LivestreamModel, 0, len(livestreamModels))
+	for _, livestreamID := range uniqueLivestreamIDs {
+		livestreamModel, ok := livestreamModels[livestreamID]
+		if !ok {
+			return nil, sql.ErrNoRows
+		}
+		livestreamModelSlice = append(livestreamModelSlice, livestreamModel)
+	}
+	livestreamResponses, err := fillLivestreamResponses(ctx, q, livestreamModelSlice)
+	if err != nil {
+		return nil, err
+	}
+	livestreamsByID := make(map[int64]Livestream, len(livestreamModelSlice))
+	for i, livestreamModel := range livestreamModelSlice {
+		livestreamsByID[livestreamModel.ID] = livestreamResponses[i]
 	}
 
-	return reaction, nil
+	reactions := make([]Reaction, len(reactionModels))
+	for i, reactionModel := range reactionModels {
+		user, ok := userResponses[reactionModel.UserID]
+		if !ok {
+			return nil, sql.ErrNoRows
+		}
+		livestream, ok := livestreamsByID[reactionModel.LivestreamID]
+		if !ok {
+			return nil, sql.ErrNoRows
+		}
+
+		reactions[i] = Reaction{
+			ID:         reactionModel.ID,
+			EmojiName:  reactionModel.EmojiName,
+			User:       user,
+			Livestream: livestream,
+			CreatedAt:  reactionModel.CreatedAt,
+		}
+	}
+	return reactions, nil
 }

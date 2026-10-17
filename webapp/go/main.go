@@ -102,7 +102,8 @@ func connectDB(logger echo.Logger) (*sqlx.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(10)
+	db.SetMaxOpenConns(100)
+	db.SetMaxIdleConns(100)
 
 	if err := db.Ping(); err != nil {
 		return nil, err
@@ -116,6 +117,9 @@ func initializeHandler(c echo.Context) error {
 		c.Logger().Warnf("init.sh failed with err=%s", string(out))
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
 	}
+
+	// DBを作り直したので、ユーザ情報 (テーマ・アイコンハッシュ) のキャッシュも捨てる
+	resetUserInfoCache()
 
 	if err := loadTagCache(c.Request().Context(), dbConn); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to load tags: "+err.Error())

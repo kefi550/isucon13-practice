@@ -78,12 +78,6 @@ func getLivecommentsHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "livestream_id in path must be integer")
 	}
 
-	tx, err := dbConn.BeginTxx(ctx, nil)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
-	}
-	defer tx.Rollback()
-
 	query := "SELECT * FROM livecomments WHERE livestream_id = ? ORDER BY created_at DESC"
 	if c.QueryParam("limit") != "" {
 		limit, err := strconv.Atoi(c.QueryParam("limit"))
@@ -93,27 +87,14 @@ func getLivecommentsHandler(c echo.Context) error {
 		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
 
-	livecommentModels := []LivecommentModel{}
-	err = tx.SelectContext(ctx, &livecommentModels, query, livestreamID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return c.JSON(http.StatusOK, []*Livecomment{})
-	}
-	if err != nil {
+	var livecommentModels []*LivecommentModel
+	if err := dbConn.SelectContext(ctx, &livecommentModels, query, livestreamID); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livecomments: "+err.Error())
 	}
 
-	livecomments := make([]Livecomment, len(livecommentModels))
-	for i := range livecommentModels {
-		livecomment, err := fillLivecommentResponse(ctx, tx, livecommentModels[i])
-		if err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to fil livecomments: "+err.Error())
-		}
-
-		livecomments[i] = livecomment
-	}
-
-	if err := tx.Commit(); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
+	livecomments, err := fillLivecommentResponses(ctx, dbConn, livecommentModels)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fil livecomments: "+err.Error())
 	}
 
 	return c.JSON(http.StatusOK, livecomments)
@@ -136,23 +117,13 @@ func getNgwords(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "livestream_id in path must be integer")
 	}
 
-	tx, err := dbConn.BeginTxx(ctx, nil)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
-	}
-	defer tx.Rollback()
-
 	var ngWords []*NGWord
-	if err := tx.SelectContext(ctx, &ngWords, "SELECT * FROM ng_words WHERE user_id = ? AND livestream_id = ? ORDER BY created_at DESC", userID, livestreamID); err != nil {
+	if err := dbConn.SelectContext(ctx, &ngWords, "SELECT * FROM ng_words WHERE user_id = ? AND livestream_id = ? ORDER BY created_at DESC", userID, livestreamID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return c.JSON(http.StatusOK, []*NGWord{})
 		} else {
 			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get NG words: "+err.Error())
 		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
 	}
 
 	return c.JSON(http.StatusOK, ngWords)
@@ -409,61 +380,159 @@ func moderateHandler(c echo.Context) error {
 	})
 }
 
-func fillLivecommentResponse(ctx context.Context, tx *sqlx.Tx, livecommentModel LivecommentModel) (Livecomment, error) {
-	commentOwnerModel := UserModel{}
-	if err := tx.GetContext(ctx, &commentOwnerModel, "SELECT * FROM users WHERE id = ?", livecommentModel.UserID); err != nil {
-		return Livecomment{}, err
-	}
-	commentOwner, err := fillUserResponse(ctx, tx, commentOwnerModel)
+func fillLivecommentResponse(ctx context.Context, q sqlx.QueryerContext, livecommentModel LivecommentModel) (Livecomment, error) {
+	livecomments, err := fillLivecommentResponses(ctx, q, []*LivecommentModel{&livecommentModel})
 	if err != nil {
 		return Livecomment{}, err
 	}
-
-	livestreamModel := LivestreamModel{}
-	if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livecommentModel.LivestreamID); err != nil {
-		return Livecomment{}, err
-	}
-	livestream, err := fillLivestreamResponse(ctx, tx, livestreamModel)
-	if err != nil {
-		return Livecomment{}, err
-	}
-
-	livecomment := Livecomment{
-		ID:         livecommentModel.ID,
-		User:       commentOwner,
-		Livestream: livestream,
-		Comment:    livecommentModel.Comment,
-		Tip:        livecommentModel.Tip,
-		CreatedAt:  livecommentModel.CreatedAt,
-	}
-
-	return livecomment, nil
+	return livecomments[0], nil
 }
 
-func fillLivecommentReportResponse(ctx context.Context, tx *sqlx.Tx, reportModel LivecommentReportModel) (LivecommentReport, error) {
-	reporterModel := UserModel{}
-	if err := tx.GetContext(ctx, &reporterModel, "SELECT * FROM users WHERE id = ?", reportModel.UserID); err != nil {
-		return LivecommentReport{}, err
+// fillLivecommentResponses は複数のライブコメントレスポンスを IN 句でまとめて組み立てる (N+1解消)
+func fillLivecommentResponses(ctx context.Context, q sqlx.QueryerContext, livecommentModels []*LivecommentModel) ([]Livecomment, error) {
+	if len(livecommentModels) == 0 {
+		return []Livecomment{}, nil
 	}
-	reporter, err := fillUserResponse(ctx, tx, reporterModel)
+
+	userIDs := make([]int64, 0, len(livecommentModels))
+	livestreamIDs := make([]int64, 0, len(livecommentModels))
+	for _, livecommentModel := range livecommentModels {
+		userIDs = append(userIDs, livecommentModel.UserID)
+		livestreamIDs = append(livestreamIDs, livecommentModel.LivestreamID)
+	}
+
+	users, err := fetchUsersByIDs(ctx, q, userIDs)
+	if err != nil {
+		return nil, err
+	}
+	userResponses := make(map[int64]User, len(users))
+	for userID, userModel := range users {
+		user, err := fillUserResponse(ctx, q, *userModel)
+		if err != nil {
+			return nil, err
+		}
+		userResponses[userID] = user
+	}
+
+	// 配信は重複を除いてまとめて取得し、元の順序に合わせて割り当てる
+	uniqueLivestreamIDs := distinctInt64s(livestreamIDs)
+	livestreamModels, err := fetchLivestreamsByIDs(ctx, q, uniqueLivestreamIDs)
+	if err != nil {
+		return nil, err
+	}
+	livestreamModelSlice := make([]*LivestreamModel, 0, len(livestreamModels))
+	for _, livestreamID := range uniqueLivestreamIDs {
+		livestreamModel, ok := livestreamModels[livestreamID]
+		if !ok {
+			return nil, sql.ErrNoRows
+		}
+		livestreamModelSlice = append(livestreamModelSlice, livestreamModel)
+	}
+	livestreamResponses, err := fillLivestreamResponses(ctx, q, livestreamModelSlice)
+	if err != nil {
+		return nil, err
+	}
+	livestreamsByID := make(map[int64]Livestream, len(livestreamModelSlice))
+	for i, livestreamModel := range livestreamModelSlice {
+		livestreamsByID[livestreamModel.ID] = livestreamResponses[i]
+	}
+
+	livecomments := make([]Livecomment, len(livecommentModels))
+	for i, livecommentModel := range livecommentModels {
+		user, ok := userResponses[livecommentModel.UserID]
+		if !ok {
+			return nil, sql.ErrNoRows
+		}
+		livestream, ok := livestreamsByID[livecommentModel.LivestreamID]
+		if !ok {
+			return nil, sql.ErrNoRows
+		}
+
+		livecomments[i] = Livecomment{
+			ID:         livecommentModel.ID,
+			User:       user,
+			Livestream: livestream,
+			Comment:    livecommentModel.Comment,
+			Tip:        livecommentModel.Tip,
+			CreatedAt:  livecommentModel.CreatedAt,
+		}
+	}
+	return livecomments, nil
+}
+
+func fillLivecommentReportResponse(ctx context.Context, q sqlx.QueryerContext, reportModel LivecommentReportModel) (LivecommentReport, error) {
+	reports, err := fillLivecommentReportResponses(ctx, q, []*LivecommentReportModel{&reportModel})
 	if err != nil {
 		return LivecommentReport{}, err
 	}
+	return reports[0], nil
+}
 
-	livecommentModel := LivecommentModel{}
-	if err := tx.GetContext(ctx, &livecommentModel, "SELECT * FROM livecomments WHERE id = ?", reportModel.LivecommentID); err != nil {
-		return LivecommentReport{}, err
+// fillLivecommentReportResponses は複数のスパム報告レスポンスを IN 句でまとめて組み立てる (N+1解消)
+func fillLivecommentReportResponses(ctx context.Context, q sqlx.QueryerContext, reportModels []*LivecommentReportModel) ([]LivecommentReport, error) {
+	if len(reportModels) == 0 {
+		return []LivecommentReport{}, nil
 	}
-	livecomment, err := fillLivecommentResponse(ctx, tx, livecommentModel)
+
+	reportUserIDs := make([]int64, 0, len(reportModels))
+	livecommentIDs := make([]int64, 0, len(reportModels))
+	for _, reportModel := range reportModels {
+		reportUserIDs = append(reportUserIDs, reportModel.UserID)
+		livecommentIDs = append(livecommentIDs, reportModel.LivecommentID)
+	}
+
+	users, err := fetchUsersByIDs(ctx, q, reportUserIDs)
 	if err != nil {
-		return LivecommentReport{}, err
+		return nil, err
+	}
+	userResponses := make(map[int64]User, len(users))
+	for userID, userModel := range users {
+		user, err := fillUserResponse(ctx, q, *userModel)
+		if err != nil {
+			return nil, err
+		}
+		userResponses[userID] = user
 	}
 
-	report := LivecommentReport{
-		ID:          reportModel.ID,
-		Reporter:    reporter,
-		Livecomment: livecomment,
-		CreatedAt:   reportModel.CreatedAt,
+	uniqueLivecommentIDs := distinctInt64s(livecommentIDs)
+	livecommentModels, err := fetchLivecommentsByIDs(ctx, q, uniqueLivecommentIDs)
+	if err != nil {
+		return nil, err
 	}
-	return report, nil
+	livecommentModelSlice := make([]*LivecommentModel, 0, len(livecommentModels))
+	for _, livecommentID := range uniqueLivecommentIDs {
+		livecommentModel, ok := livecommentModels[livecommentID]
+		if !ok {
+			return nil, sql.ErrNoRows
+		}
+		livecommentModelSlice = append(livecommentModelSlice, livecommentModel)
+	}
+	livecommentResponses, err := fillLivecommentResponses(ctx, q, livecommentModelSlice)
+	if err != nil {
+		return nil, err
+	}
+	livecommentsByID := make(map[int64]Livecomment, len(livecommentModelSlice))
+	for i, livecommentModel := range livecommentModelSlice {
+		livecommentsByID[livecommentModel.ID] = livecommentResponses[i]
+	}
+
+	reports := make([]LivecommentReport, len(reportModels))
+	for i, reportModel := range reportModels {
+		reporter, ok := userResponses[reportModel.UserID]
+		if !ok {
+			return nil, sql.ErrNoRows
+		}
+		livecomment, ok := livecommentsByID[reportModel.LivecommentID]
+		if !ok {
+			return nil, sql.ErrNoRows
+		}
+
+		reports[i] = LivecommentReport{
+			ID:          reportModel.ID,
+			Reporter:    reporter,
+			Livecomment: livecomment,
+			CreatedAt:   reportModel.CreatedAt,
+		}
+	}
+	return reports, nil
 }
