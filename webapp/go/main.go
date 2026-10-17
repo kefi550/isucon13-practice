@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/exec"
 	"strconv"
@@ -66,6 +67,9 @@ func connectDB(logger echo.Logger) (*sqlx.DB, error) {
 	conf.Passwd = "isucon"
 	conf.DBName = "isupipe"
 	conf.ParseTime = true
+	// プレースホルダをドライバ側で展開し、サーバー側プリペアドステートメントの往復をなくす
+	// （performance_schema の digest 集計にもクエリが載るようになる）
+	conf.InterpolateParams = true
 
 	if v, ok := os.LookupEnv(networkTypeEnvKey); ok {
 		conf.Net = v
@@ -124,6 +128,11 @@ func initializeHandler(c echo.Context) error {
 }
 
 func main() {
+	// プロファイリング用の pprof サーバー（localhost のみで待ち受け、ssh 経由で取得する）
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
+
 	e := echo.New()
 	e.Debug = true
 	e.Logger.SetLevel(echolog.DEBUG)
