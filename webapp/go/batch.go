@@ -126,7 +126,11 @@ type userInfo struct {
 	iconHash string
 }
 
-var userInfoCache sync.Map // int64 -> userInfo
+var (
+	userInfoCache     sync.Map // int64 -> userInfo
+	userNameToIDCache sync.Map // string -> int64
+	iconImageCache    sync.Map // int64 -> []byte (アイコン画像)
+)
 
 func loadUserInfo(ctx context.Context, q sqlx.QueryerContext, userID int64) (userInfo, error) {
 	themeModel := ThemeModel{}
@@ -165,15 +169,59 @@ func getUserInfo(ctx context.Context, q sqlx.QueryerContext, userID int64) (user
 	return info, nil
 }
 
-// invalidateUserInfoCache はアイコン変更時に呼び出してキャッシュを捨てる
-func invalidateUserInfoCache(userID int64) {
-	userInfoCache.Delete(userID)
+// getUserIDByName は username から user_id をキャッシュ付きで解決する
+// (users.name は UNIQUE で、ユーザの削除は存在しないためキャッシュして良い)
+func getUserIDByName(ctx context.Context, q sqlx.QueryerContext, name string) (int64, error) {
+	if cached, ok := userNameToIDCache.Load(name); ok {
+		return cached.(int64), nil
+	}
+
+	var userID int64
+	if err := sqlx.GetContext(ctx, q, &userID, "SELECT id FROM users WHERE name = ?", name); err != nil {
+		return 0, err
+	}
+	userNameToIDCache.Store(name, userID)
+	return userID, nil
 }
 
-// resetUserInfoCache は初期化時に呼び出して全キャッシュを捨てる
-func resetUserInfoCache() {
+// cacheUserNameToID はユーザ登録時に name -> user_id を登録する
+func cacheUserNameToID(name string, userID int64) {
+	userNameToIDCache.Store(name, userID)
+}
+
+// getUserIconImage はアイコン画像をキャッシュ付きで取得する
+func getUserIconImage(ctx context.Context, q sqlx.QueryerContext, userID int64) ([]byte, error) {
+	if cached, ok := iconImageCache.Load(userID); ok {
+		return cached.([]byte), nil
+	}
+
+	var image []byte
+	if err := sqlx.GetContext(ctx, q, &image, "SELECT image FROM icons WHERE user_id = ?", userID); err != nil {
+		return nil, err
+	}
+	iconImageCache.Store(userID, image)
+	return image, nil
+}
+
+// invalidateUserInfoCache はアイコン変更時に呼び出してキャッシュを捨てる
+// (画像と icon_hash を別々に更新すると不整合が起きうるため、両方捨てて次の参照で読み直す)
+func invalidateUserInfoCache(userID int64) {
+	userInfoCache.Delete(userID)
+	iconImageCache.Delete(userID)
+}
+
+// resetUserCaches は初期化時に呼び出して全キャッシュを捨てる
+func resetUserCaches() {
 	userInfoCache.Range(func(key, _ any) bool {
 		userInfoCache.Delete(key)
+		return true
+	})
+	userNameToIDCache.Range(func(key, _ any) bool {
+		userNameToIDCache.Delete(key)
+		return true
+	})
+	iconImageCache.Range(func(key, _ any) bool {
+		iconImageCache.Delete(key)
 		return true
 	})
 }

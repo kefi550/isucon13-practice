@@ -111,8 +111,8 @@ func getIconHandler(c echo.Context) error {
 
 	username := c.Param("username")
 
-	var user UserModel
-	if err := dbConn.GetContext(ctx, &user, "SELECT id FROM users WHERE name = ?", username); err != nil {
+	userID, err := getUserIDByName(ctx, dbConn, username)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return echo.NewHTTPError(http.StatusNotFound, "not found user that has the given username")
 		}
@@ -121,24 +121,20 @@ func getIconHandler(c echo.Context) error {
 
 	// 条件付きGET(If-None-Match)でicon_hashが一致する場合は、画像本体を読まずに304を返す
 	// 条件付きGETでない場合は304を返してはいけないので、ヘッダがあるときだけ判定する
+	// icon_hash はユーザ情報キャッシュ (メモリ) から取得する
 	if ifNoneMatch := c.Request().Header.Get("If-None-Match"); ifNoneMatch != "" {
-		var iconHash string
-		if err := dbConn.GetContext(ctx, &iconHash, "SELECT icon_hash FROM icons WHERE user_id = ?", user.ID); err != nil {
-			if !errors.Is(err, sql.ErrNoRows) {
-				return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user icon hash: "+err.Error())
-			}
-			iconHash, err = getFallbackIconHash()
-			if err != nil {
-				return echo.NewHTTPError(http.StatusInternalServerError, "failed to get fallback icon hash: "+err.Error())
-			}
+		info, err := getUserInfo(ctx, dbConn, userID)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user icon hash: "+err.Error())
 		}
-		if strings.Trim(ifNoneMatch, `"`) == iconHash {
+		if strings.Trim(ifNoneMatch, `"`) == info.iconHash {
 			return c.NoContent(http.StatusNotModified)
 		}
 	}
 
-	var image []byte
-	if err := dbConn.GetContext(ctx, &image, "SELECT image FROM icons WHERE user_id = ?", user.ID); err != nil {
+	// 画像もメモリキャッシュから返す (POST /api/icon と初期化で無効化される)
+	image, err := getUserIconImage(ctx, dbConn, userID)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return c.File(fallbackImage)
 		} else {
@@ -276,6 +272,9 @@ func registerHandler(c echo.Context) error {
 	}
 
 	userModel.ID = userID
+
+	// 新規ユーザの name -> user_id をキャッシュに登録する
+	cacheUserNameToID(userModel.Name, userID)
 
 	themeModel := ThemeModel{
 		UserID:   userID,
